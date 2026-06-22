@@ -1,0 +1,46 @@
+# =====================================================================
+# Gitignore para Laboratorio 3 — Apache Spark
+# =====================================================================
+
+# scala-cli, bloop, metals
+.bsp/
+.bloop/
+.metals/
+.scala-build/
+project/metals.sbt
+
+# vs code
+.vscode/
+
+# scala 3
+.tasty
+
+# sbt y artefactos de compilación (¡Crucial para Spark!)
+project/project/
+project/target/
+target/
+bin/
+build/
+
+# Carpetas prohibidas por la cátedra (no deben subirse al repo)
+hello_world/
+reddit-mock/
+skeleton/
+
+# Archivos pesados de datos y simulaciones locales (JSONs grandes)
+*.json
+*.log
+
+# Archivos temporales ocultos de Linux/Gnome/Mac que prohíbe la consigna
+._*
+.DS_Store
+.history
+.cache/
+.cache-main
+
+# General compilados
+*.class
+*.iml
+*.ipr
+*.iws
+.idea/
