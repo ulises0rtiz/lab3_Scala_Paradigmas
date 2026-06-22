@@ -143,6 +143,8 @@ object Main {
     val entityCountsMap = finalResults.toMap
     println(Formatters.formatEntityStats(entityCountsMap, cmdArgs.topK))
 
+    // ejercicio 5 
+    filteredPostsRDD.unpersist()
     spark.stop()
   }
 }
