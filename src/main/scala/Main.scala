@@ -3,9 +3,12 @@ import java.io.FileNotFoundException
 
 object Main {
   def main(args: Array[String]): Unit = {
-    val cmdArgs = CommandLineArgs.parse(args).getOrElse(return)
+    val cmdArgs = CommandLineArgs.parse(args) match {
+      case Some(parsed) => parsed
+      case None => return 
+    }
 
-    // cargo los subscriptions desde el archivo JSON manejando errores
+    // cargo suscripciones desde archivo JSON, manejo de errores y advertencias
     val subscriptionsRaw = try {
       FileIO.readSubscriptions(cmdArgs.subscriptionFile)
     } catch {
@@ -17,13 +20,14 @@ object Main {
         return
     }
 
+    // filtro de suscripciones válidas (aquellas que tienen 'name' y 'url')
     val subscriptions = subscriptionsRaw.flatten
     if (subscriptions.isEmpty) {
       println("Error: No valid subscriptions found")
       return
     }
 
-    // inicia spark localmente
+    // inicialización de Spark
     val spark = SparkSession.builder()
       .appName("RedditNER")
       .master("local[*]")
@@ -31,9 +35,16 @@ object Main {
     val sc = spark.sparkContext
     sc.setLogLevel("ERROR")
 
-    // pararelizo y proceso los Feeds con manejo seguro (Worker)
+    // inicialización de acumuladores para estadísticas
+    val feedsSuccessAcc = sc.longAccumulator("FeedsSuccess")
+    val feedsFailedAcc = sc.longAccumulator("FeedsFailed")
+    val postsTotalAcc = sc.longAccumulator("PostsTotal")
+    val postsDiscardedAcc = sc.longAccumulator("PostsDiscarded")
+
+    // paralelización de la lista de suscripciones
     val subscriptionsRDD = sc.parallelize(subscriptions)
 
+    // descargar feeds y parsear posts, con manejo de errores y acumuladores
     val downloadResultsRDD = subscriptionsRDD.map { sub =>
       val feedOpt = try {
         FileIO.downloadFeed(sub.url)
@@ -42,7 +53,10 @@ object Main {
       }
 
       if (feedOpt.isEmpty) {
+        feedsFailedAcc.add(1)
         println(s"Warning: Failed to download from '${sub.name}' (${sub.url})")
+      } else {
+        feedsSuccessAcc.add(1)
       }
 
       val posts = feedOpt match {
@@ -56,59 +70,78 @@ object Main {
           }
         case None => List.empty[Post]
       }
-
-      (feedOpt.isDefined, posts)
-    }.cache() // fundamental para no descargar dos veces al contar
-
-    // estadisticas
-    val feedsSuccess = downloadResultsRDD.filter(_._1).count().toInt
-    val feedsFailed = downloadResultsRDD.filter(!_._1).count().toInt
-
-    val allPostsRDD = downloadResultsRDD.flatMap(_._2).cache()
-    val postsSuccess = allPostsRDD.count().toInt
-    val postsFailed = downloadResultsRDD.filter(_._2.isEmpty).count().toInt
-
-    // extraigo el RDD de posts filtrados (este es el "resultado" que pide el Ej 2)
-    val filteredPostsRDD = allPostsRDD
-      .filter(p => p.title.nonEmpty && p.selftext.nonEmpty && p.selftext.trim.nonEmpty)
-      .cache()
       
-    val postsFiltered = postsSuccess - filteredPostsRDD.count().toInt
+      posts.foreach(_ => postsTotalAcc.add(1))
+      posts
+    }
 
-    val totalChars = filteredPostsRDD.map(p => p.title.length + p.selftext.length).sum().toLong
-    val avgChars = if (filteredPostsRDD.count() > 0) (totalChars / filteredPostsRDD.count()).toInt else 0
+    val allPostsRDD = downloadResultsRDD.flatMap(posts => posts)
 
+    // filtro de posts vacíos o irrelevantes, con acumulador de posts descartados
+    val filteredPostsRDD = allPostsRDD.filter { p =>
+      val isValid = p.title.nonEmpty && p.selftext.nonEmpty && p.selftext.trim.nonEmpty
+      if (!isValid) postsDiscardedAcc.add(1)
+      isValid
+    }.cache()
+
+    // mido tiempo de la primera etapa
+    val t0 = System.currentTimeMillis()
+    val validPostsCount = filteredPostsRDD.count()
+    val t1 = System.currentTimeMillis()
+    println(s"\n[Tiempo] Descarga y filtrado: ${(t1 - t0) / 1000.0} segundos\n")
+
+    // calculo de estadísticas de longitud de posts
+    val totalChars = if (validPostsCount > 0) filteredPostsRDD.map(p => p.title.length + p.selftext.length).sum().toLong else 0L
+    val avgChars = if (validPostsCount > 0) (totalChars / validPostsCount).toInt else 0
+
+    // preparo estadísticas de procesamiento
     val stats = Map(
-      "feedsSuccess" -> feedsSuccess,
-      "feedsFailed" -> feedsFailed,
-      "postsSuccess" -> postsSuccess,
-      "postsFailed" -> postsFailed,
-      "postsFiltered" -> postsFiltered,
+      "feedsSuccess" -> feedsSuccessAcc.value.toInt,
+      "feedsFailed" -> feedsFailedAcc.value.toInt,
+      "postsSuccess" -> postsTotalAcc.value.toInt,
+      "postsFailed" -> 0, 
+      "postsFiltered" -> postsDiscardedAcc.value.toInt,
       "avgChars" -> avgChars
     )
 
+    // imprimir estadísticas de procesamiento
     println(Formatters.formatProcessingStats(stats))
     println()
 
-    if (filteredPostsRDD.count() == 0) {
+    // chequeo de que haya posts válidos antes de continuar con la detección de entidades
+    if (validPostsCount == 0) {
       println("Error: No valid posts downloaded after filtering")
       spark.stop()
       return
     }
- 
+
+    // cargo diccionario de entidades
     val dictionary = Dictionary.loadAll(cmdArgs.entitiesDir)
-    
-    val allEntities = filteredPostsRDD.collect().toList.flatMap { post =>
+
+    // detecto entidades
+    val entitiesRDD = filteredPostsRDD.flatMap { post =>
       val combinedText = post.title + " " + post.selftext
       Analyzer.detectEntities(combinedText, dictionary)
     }
 
-    val entityCounts = Analyzer.countEntities(allEntities)
-    val typeStats = Analyzer.countByType(allEntities)
+    // contador entidades
+    val pairsRDD = entitiesRDD.map(e => ((e.entityType, e.text), 1))
+    val countsRDD = pairsRDD.reduceByKey(_ + _)
+    val sortedRDD = countsRDD.sortBy(pair => (-pair._2, pair._1._1, pair._1._2))
 
+    // mido tiempo del cómputo Map-Reduce
+    val t2 = System.currentTimeMillis()
+    val finalResults = sortedRDD.collect().toList
+    val t3 = System.currentTimeMillis()
+    println(s"\n[Tiempo] Procesamiento Map-Reduce: ${(t3 - t2) / 1000.0} segundos\n")
+
+    val typeStats = finalResults.groupBy(_._1._1).view.mapValues(_.map(_._2).sum).toMap + ("total" -> finalResults.map(_._2).sum)
+    
     println(Formatters.formatTypeStats(typeStats))
     println()
-    println(Formatters.formatEntityStats(entityCounts, cmdArgs.topK))
+    
+    val entityCountsMap = finalResults.toMap
+    println(Formatters.formatEntityStats(entityCountsMap, cmdArgs.topK))
 
     spark.stop()
   }

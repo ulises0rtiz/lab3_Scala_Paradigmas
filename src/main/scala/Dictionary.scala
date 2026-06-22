@@ -51,3 +51,4 @@ object Dictionary {
       organizationsOpt.getOrElse(List()) :::
       placesOpt.getOrElse(List())
   }
+}  
