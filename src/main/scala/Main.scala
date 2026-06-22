@@ -1,42 +1,83 @@
+import org.apache.spark.sql.SparkSession
+import java.io.FileNotFoundException
+
 object Main {
   def main(args: Array[String]): Unit = {
-    // Parse command-line arguments
-    val cmdArgs = CommandLineArgs.parse(args) match {
-      case Some(parsed) => parsed
-      case None => return // scopt prints error messages
+    val cmdArgs = CommandLineArgs.parse(args).getOrElse(return)
+
+    // cargo los subscriptions desde el archivo JSON manejando errores
+    val subscriptionsRaw = try {
+      FileIO.readSubscriptions(cmdArgs.subscriptionFile)
+    } catch {
+      case _: FileNotFoundException =>
+        println(s"Error: Could not load ${cmdArgs.subscriptionFile} - file not found")
+        return
+      case _: Exception =>
+        println(s"Error: Could not load ${cmdArgs.subscriptionFile} - invalid JSON format")
+        return
     }
 
-    // Load subscriptions
-    val subscriptionOpts = FileIO.readSubscriptions(cmdArgs.subscriptionFile)
+    val subscriptions = subscriptionsRaw.flatten
+    if (subscriptions.isEmpty) {
+      println("Error: No valid subscriptions found")
+      return
+    }
 
-    // Filter out malformed subscriptions (None values)
-    val subscriptions = subscriptionOpts.flatten
+    // inicia spark localmente
+    val spark = SparkSession.builder()
+      .appName("RedditNER")
+      .master("local[*]")
+      .getOrCreate()
+    val sc = spark.sparkContext
+    sc.setLogLevel("ERROR")
 
-    // Download feeds and parse posts, tracking success/failure
-    val downloadResults = subscriptions.map { subscription =>
-      val feedOpt = FileIO.downloadFeed(subscription.url)
-      val posts = feedOpt.fold(List[Post]())(JsonParser.parsePosts(_, subscription.name))
+    // pararelizo y proceso los Feeds con manejo seguro (Worker)
+    val subscriptionsRDD = sc.parallelize(subscriptions)
+
+    val downloadResultsRDD = subscriptionsRDD.map { sub =>
+      val feedOpt = try {
+        FileIO.downloadFeed(sub.url)
+      } catch {
+        case _: Exception => None
+      }
+
+      if (feedOpt.isEmpty) {
+        println(s"Warning: Failed to download from '${sub.name}' (${sub.url})")
+      }
+
+      val posts = feedOpt match {
+        case Some(json) =>
+          try {
+            JsonParser.parsePosts(json, sub.name)
+          } catch {
+            case _: Exception =>
+              println(s"Warning: Failed to parse posts from '${sub.name}' (${sub.url})")
+              List.empty[Post]
+          }
+        case None => List.empty[Post]
+      }
+
       (feedOpt.isDefined, posts)
-    }
+    }.cache() // fundamental para no descargar dos veces al contar
 
-    // Count feed successes/failures
-    val feedsSuccess = downloadResults.count(_._1)
-    val feedsFailed = downloadResults.length - feedsSuccess
+    // estadisticas
+    val feedsSuccess = downloadResultsRDD.filter(_._1).count().toInt
+    val feedsFailed = downloadResultsRDD.filter(!_._1).count().toInt
 
-    // Flatten all posts and count JSON parse failures
-    val allPosts = downloadResults.flatMap(_._2)
-    val postsSuccess = allPosts.length
-    val postsFailed = downloadResults.count(_._2.isEmpty)
+    val allPostsRDD = downloadResultsRDD.flatMap(_._2).cache()
+    val postsSuccess = allPostsRDD.count().toInt
+    val postsFailed = downloadResultsRDD.filter(_._2.isEmpty).count().toInt
 
-    // Filter empty posts
-    val filteredPosts = Analyzer.filterEmptyPosts(allPosts)
-    val postsFiltered = allPosts.length - filteredPosts.length
+    // extraigo el RDD de posts filtrados (este es el "resultado" que pide el Ej 2)
+    val filteredPostsRDD = allPostsRDD
+      .filter(p => p.title.nonEmpty && p.selftext.nonEmpty && p.selftext.trim.nonEmpty)
+      .cache()
+      
+    val postsFiltered = postsSuccess - filteredPostsRDD.count().toInt
 
-    // Calculate average characters in filtered posts
-    val totalChars = filteredPosts.map(post => post.title.length + post.selftext.length).sum
-    val avgChars = if (filteredPosts.nonEmpty) totalChars / filteredPosts.length else 0
+    val totalChars = filteredPostsRDD.map(p => p.title.length + p.selftext.length).sum().toLong
+    val avgChars = if (filteredPostsRDD.count() > 0) (totalChars / filteredPostsRDD.count()).toInt else 0
 
-    // Prepare statistics
     val stats = Map(
       "feedsSuccess" -> feedsSuccess,
       "feedsFailed" -> feedsFailed,
@@ -46,31 +87,29 @@ object Main {
       "avgChars" -> avgChars
     )
 
-    // Print output
     println(Formatters.formatProcessingStats(stats))
     println()
 
-    // Check if we have any posts to process
-    if (filteredPosts.isEmpty) {
+    if (filteredPostsRDD.count() == 0) {
       println("Error: No valid posts downloaded after filtering")
+      spark.stop()
       return
     }
-
-    // Load dictionaries
+ 
     val dictionary = Dictionary.loadAll(cmdArgs.entitiesDir)
-
-    // Detect entities in all posts (combine title and selftext)
-    val allEntities = filteredPosts.flatMap { post =>
+    
+    val allEntities = filteredPostsRDD.collect().toList.flatMap { post =>
       val combinedText = post.title + " " + post.selftext
       Analyzer.detectEntities(combinedText, dictionary)
     }
 
-    // Count entities
     val entityCounts = Analyzer.countEntities(allEntities)
     val typeStats = Analyzer.countByType(allEntities)
 
     println(Formatters.formatTypeStats(typeStats))
     println()
     println(Formatters.formatEntityStats(entityCounts, cmdArgs.topK))
+
+    spark.stop()
   }
 }

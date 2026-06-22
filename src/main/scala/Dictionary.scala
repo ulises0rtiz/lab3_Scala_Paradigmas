@@ -7,18 +7,22 @@ object Dictionary {
    * @return Option containing list of entities, None if file missing
    */
   def loadFromFile(filePath: String, entityType: String): Option[List[NamedEntity]] = {
-    FileIO.readDictionaryFile(filePath).map { lines =>
-      lines.map { name =>
-        entityType match {
-          case "Person"              => new Person(name)
-          case "Organization"        => new Organization(name)
-          case "University"          => new University(name)
-          case "Place"               => new Place(name)
-          case "Technology"          => new Technology(name)
-          case "ProgrammingLanguage" => new ProgrammingLanguage(name)
-          case _                     => new Person(name) // fallback
-        }
-      }
+    FileIO.readDictionaryFile(filePath) match {
+      case Some(lines) =>
+        Some(lines.map { name =>
+          entityType match {
+            case "Person"              => new Person(name)
+            case "Organization"        => new Organization(name)
+            case "University"          => new University(name)
+            case "Place"               => new Place(name)
+            case "Technology"          => new Technology(name)
+            case "ProgrammingLanguage" => new ProgrammingLanguage(name)
+            case _                     => new Person(name)
+          }
+        })
+      case None =>
+        println(s"Warning: Could not load $filePath")
+        None
     }
   }
 
@@ -29,17 +33,16 @@ object Dictionary {
    * @return combined list of all entities from all successfully loaded dictionaries
    */
   def loadAll(entitiesDir: String): List[NamedEntity] = {
-    // Check if entities directory exists
     val dataDir = new java.io.File(entitiesDir)
+    if (!dataDir.exists() || !dataDir.isDirectory) {
+      println(s"Error: entities directory '$entitiesDir' not found")
+      return List()
+    }
 
     val peopleOpt = loadFromFile(s"$entitiesDir/people.txt", "Person")
-
     val universitiesOpt = loadFromFile(s"$entitiesDir/universities.txt", "University")
-
     val languagesOpt = loadFromFile(s"$entitiesDir/languages.txt", "ProgrammingLanguage")
-
     val organizationsOpt = loadFromFile(s"$entitiesDir/organizations.txt", "Organization")
-
     val placesOpt = loadFromFile(s"$entitiesDir/places.txt", "Place")
 
     peopleOpt.getOrElse(List()) :::
@@ -48,4 +51,3 @@ object Dictionary {
       organizationsOpt.getOrElse(List()) :::
       placesOpt.getOrElse(List())
   }
-}

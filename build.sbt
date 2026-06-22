@@ -17,3 +17,17 @@ libraryDependencies ++= Seq(
   "org.json4s" %% "json4s-jackson" % "3.7.0-M11",
   "com.github.scopt" %% "scopt" % "4.1.0"
 )
+
+// Dependencias de Spark
+libraryDependencies ++= Seq(
+  "org.apache.spark" %% "spark-core" % "3.5.1",
+  "org.apache.spark" %% "spark-sql" % "3.5.1"
+)
+
+// Configuración para evitar errores de Java 17+ con Hadoop
+ThisBuild / classLoaderLayeringStrategy := ClassLoaderLayeringStrategy.Flat
+fork := true
+ThisBuild / javaOptions ++= Seq(
+  "--add-exports=java.base/sun.nio.ch=ALL-UNNAMED",
+  "--add-opens=java.base/java.nio=ALL-UNNAMED"
+)

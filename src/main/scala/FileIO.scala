@@ -20,7 +20,12 @@ object FileIO {
     val subscriptions = json.extract[List[Map[String, String]]]
 
     subscriptions.map { sub =>
-      Some(Subscription(sub("name"), sub("url")))
+      if (sub.contains("name") && sub.contains("url")) {
+        Some(Subscription(sub("name"), sub("url")))
+      } else {
+        println("Warning: Skipping malformed subscription (missing 'name' or 'url' field)")
+        None
+      }
     }
   }
 
