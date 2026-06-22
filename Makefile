@@ -1,17 +1,12 @@
 .PHONY: all compile run clean
 
-# Configuración estricta de entorno para Apache Spark con Java 17
-export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
-export PATH:=$(JAVA_HOME)/bin:$(PATH)
-export SBT_OPTS=--add-exports=java.base/sun.nio.ch=ALL-UNNAMED
-
-# El comando por defecto cuando se ejecuta simplemente 'make'
+# El comando por defecto cuando se ejecuta 'make'
 all: run
 
-# Compila y ejecuta con un único comando, como pide la consigna
+# Ejecuta todo forzando bash para que no pierda la ruta de sbt
 run:
-	sbt compile run
+	@bash -c 'JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 PATH="/usr/lib/jvm/java-17-openjdk-amd64/bin:$$PATH" SBT_OPTS="--add-exports=java.base/sun.nio.ch=ALL-UNNAMED" sbt compile run'
 
-# Limpia los binarios generados
+# Limpia los binarios
 clean:
-	sbt clean
+	@bash -c 'JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64 PATH="/usr/lib/jvm/java-17-openjdk-amd64/bin:$$PATH" SBT_OPTS="--add-exports=java.base/sun.nio.ch=ALL-UNNAMED" sbt clean'

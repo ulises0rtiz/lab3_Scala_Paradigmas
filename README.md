@@ -17,8 +17,12 @@ Los feeds a procesar se definen en el archivo `data/valid_subscriptions.json`. P
 
 ### Ejecución
 
-Para compilar el código fuente y ejecutar el pipeline completo con un único comando, utilice el Makefile incluido en la raíz del proyecto. Este archivo ya se encarga de inyectar las variables de entorno necesarias para Java 17:
+Para probar el proyecto de forma local, es necesario utilizar **dos terminales** simultáneas:
+
+**Paso 1: Levantar el servidor Mock (Terminal 1)**
+En la primera terminal, dirígete a la carpeta del servidor local falso y ejecútalo. Este paso es obligatorio para simular las descargas HTTP.
 
 ```bash
-make
+cd reddit-mock/
+sbt run
 ```
